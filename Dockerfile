@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     libpangocairo-1.0-0 \
     libxss1 \
     && rm -rf /var/lib/apt/lists/*
+ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
 RUN playwright install chromium
 
 COPY src/ ./src/
