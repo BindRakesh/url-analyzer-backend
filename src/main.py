@@ -23,7 +23,6 @@ logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
 def get_server_name(headers: dict, url: str) -> str:
-    """Extract server name from headers with enhanced Akamai detection."""
     for key in headers:
         if key.lower() == "server":
             server_value = headers[key].lower()
@@ -67,7 +66,21 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
             page.on("request", handle_request)
             page.on("response", handle_response)
 
-            response = await page.goto(url, timeout=10000, wait_until="domcontentloaded")
+            try:
+                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")  # Increase to 30s
+            except Exception as nav_error:
+                logger.warning(f"Navigation timeout for {url}: {nav_error}")
+                final_url = page.url if page.url else url
+                result = {
+                    "originalURL": url,
+                    "finalURL": final_url,
+                    "redirectChain": redirect_chain,
+                    "totalTime": time.time() - start_time,
+                    "warning": "Navigation timed out after 30s"
+                }
+                await websocket.send_text(json.dumps(result))
+                return
+
             final_url = page.url
 
             if not redirect_chain or redirect_chain[-1]["url"] != final_url:
@@ -125,7 +138,7 @@ async def analyze_urls_websocket(websocket: WebSocket):
             return
 
         validated_urls = [await validate_url(url) for url in urls]
-        for url in validated_urls:  # Process URLs sequentially
+        for url in validated_urls:
             await fetch_url_with_playwright(url, websocket)
 
         await websocket.send_text(json.dumps({"done": True}))
