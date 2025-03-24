@@ -7,6 +7,7 @@ import validators
 from typing import List, Dict
 import time
 import json
+import os
 
 app = FastAPI()
 
@@ -153,4 +154,7 @@ async def test():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="192.168.0.132", port=5000)
+    import os
+    port = int(os.getenv("PORT", 5000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
+    
