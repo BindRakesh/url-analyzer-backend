@@ -11,7 +11,6 @@ import os
 
 app = FastAPI()
 
-# Enable CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # Replace with your Netlify URL later
@@ -20,12 +19,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Browser pool for performance
-_browser_semaphore = asyncio.Semaphore(5)  # Limit to 5 concurrent browser instances
+_browser_semaphore = asyncio.Semaphore(2)  # Reduce to 2 to limit concurrency
 
 def get_server_name(headers: dict, url: str) -> str:
     """Extract server name from headers with enhanced Akamai detection."""
@@ -35,81 +32,81 @@ def get_server_name(headers: dict, url: str) -> str:
             if "akamai" in server_value or "ghost" in server_value:
                 return "Akamai"
             return headers[key]
-    
     logger.debug(f"Headers for {url}: {json.dumps(headers, indent=2)}")
     if any(key.lower().startswith("x-akamai") for key in headers) or "akamai" in url.lower():
         return "Akamai"
     return "Unknown"
 
-async def fetch_url_with_playwright(url: str, playwright: Playwright, websocket: WebSocket) -> None:
+async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
     """Fetch URL using Playwright and send results via WebSocket with full redirect chain."""
     async with _browser_semaphore:
-        browser = None
-        try:
-            logger.info(f"Launching browser for {url}")
-            browser = await playwright.chromium.launch(headless=True)
-            context = await browser.new_context()
-            page = await context.new_page()
+        async with async_playwright() as playwright:  # Move playwright inside
+            browser = None
+            try:
+                logger.info(f"Launching browser for {url}")
+                browser = await playwright.chromium.launch(headless=True)
+                context = await browser.new_context()
+                page = await context.new_page()
 
-            redirect_chain = []
-            start_time = time.time()
+                redirect_chain = []
+                start_time = time.time()
 
-            async def handle_request(request):
-                if request.is_navigation_request():
-                    logger.debug(f"Navigation request: {request.url}")
+                async def handle_request(request):
+                    if request.is_navigation_request():
+                        logger.debug(f"Navigation request: {request.url}")
 
-            async def handle_response(response):
-                if response.request.is_navigation_request():
+                async def handle_response(response):
+                    if response.request.is_navigation_request():
+                        hop = {
+                            "url": response.url,
+                            "status": response.status,
+                            "server": get_server_name(response.headers, response.url),
+                            "timestamp": time.time() - start_time
+                        }
+                        if not redirect_chain or redirect_chain[-1]["url"] != hop["url"]:
+                            redirect_chain.append(hop)
+                            logger.debug(f"Added hop: {hop}")
+
+                page.on("request", handle_request)
+                page.on("response", handle_response)
+
+                response = await page.goto(url, timeout=10000, wait_until="domcontentloaded")
+                final_url = page.url
+
+                if not redirect_chain or redirect_chain[-1]["url"] != final_url:
                     hop = {
-                        "url": response.url,
-                        "status": response.status,
-                        "server": get_server_name(response.headers, response.url),
+                        "url": final_url,
+                        "status": response.status if response else 200,
+                        "server": get_server_name(response.headers, final_url) if response else "Unknown",
                         "timestamp": time.time() - start_time
                     }
-                    if not redirect_chain or redirect_chain[-1]["url"] != hop["url"]:
-                        redirect_chain.append(hop)
-                        logger.debug(f"Added hop: {hop}")
+                    redirect_chain.append(hop)
+                    logger.debug(f"Added final hop: {hop}")
 
-            page.on("request", handle_request)
-            page.on("response", handle_response)
+                if len(redirect_chain) > 10:
+                    logger.warning(f"Possible redirect loop detected for {url}")
+                    redirect_chain.append({"error": "Excessive redirects (limit: 10)"})
 
-            response = await page.goto(url, timeout=10000, wait_until="domcontentloaded")
-            final_url = page.url
-
-            if not redirect_chain or redirect_chain[-1]["url"] != final_url:
-                hop = {
-                    "url": final_url,
-                    "status": response.status if response else 200,
-                    "server": get_server_name(response.headers, final_url) if response else "Unknown",
-                    "timestamp": time.time() - start_time
+                result = {
+                    "originalURL": url,
+                    "finalURL": final_url,
+                    "redirectChain": redirect_chain,
+                    "totalTime": time.time() - start_time
                 }
-                redirect_chain.append(hop)
-                logger.debug(f"Added final hop: {hop}")
+            except Exception as e:
+                logger.error(f"Error fetching {url}: {e}")
+                result = {
+                    "originalURL": url,
+                    "finalURL": None,
+                    "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
+                    "totalTime": None,
+                    "error": f"Failed to fetch: {str(e)}"
+                }
+            finally:
+                if browser:
+                    await browser.close()
 
-            if len(redirect_chain) > 10:
-                logger.warning(f"Possible redirect loop detected for {url}")
-                redirect_chain.append({"error": "Excessive redirects (limit: 10)"})
-
-            result = {
-                "originalURL": url,
-                "finalURL": final_url,
-                "redirectChain": redirect_chain,
-                "totalTime": time.time() - start_time
-            }
-        except Exception as e:
-            logger.error(f"Error fetching {url}: {e}")
-            result = {
-                "originalURL": url,
-                "finalURL": None,
-                "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
-                "totalTime": None,
-                "error": f"Failed to fetch: {str(e)}"
-            }
-        finally:
-            if browser:
-                await browser.close()
-
-        await websocket.send_text(json.dumps(result))
+            await websocket.send_text(json.dumps(result))
 
 async def validate_url(url: str) -> str:
     """Ensure URL is valid and formatted correctly."""
@@ -131,14 +128,8 @@ async def analyze_urls_websocket(websocket: WebSocket):
             return
 
         validated_urls = [await validate_url(url) for url in urls]
-        loop = asyncio.get_running_loop()  # Ensure single event loop
-
-        async with async_playwright() as playwright:
-            tasks = [
-                asyncio.ensure_future(fetch_url_with_playwright(url, playwright, websocket), loop=loop)
-                for url in validated_urls
-            ]
-            await asyncio.gather(*tasks)
+        tasks = [fetch_url_with_playwright(url, websocket) for url in validated_urls]
+        await asyncio.gather(*tasks)
 
         await websocket.send_text(json.dumps({"done": True}))
     except Exception as e:
