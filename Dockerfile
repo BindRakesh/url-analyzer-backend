@@ -17,5 +17,4 @@ RUN playwright install chromium
 
 COPY src/ ./src/
 
-ENV PORT=8080
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["python", "src/main.py"]
