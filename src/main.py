@@ -1,9 +1,7 @@
+for now my code is 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
+from playwright.async_api import async_playwright, Playwright
 import asyncio
 import logging
 import validators
@@ -14,15 +12,9 @@ import os
 
 app = FastAPI()
 
-# Rate limiting setup
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://urljourney.netlify.app/"],  # FE Netlify URL
+    allow_origins=["*"],  # Replace with your Netlify URL later
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -44,11 +36,12 @@ def get_server_name(headers: dict, url: str) -> str:
     return "Unknown"
 
 async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
+    """Fetch URL using Playwright and send results via WebSocket with full redirect chain."""
     async with async_playwright() as playwright:
         browser = None
         try:
             logger.info(f"Launching browser for {url}")
-            browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+            browser = await playwright.chromium.launch(headless=True)
             context = await browser.new_context()
             page = await context.new_page()
 
@@ -75,7 +68,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
             page.on("response", handle_response)
 
             try:
-                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")  # Increase to 30s
             except Exception as nav_error:
                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
                 final_url = page.url if page.url else url
@@ -118,7 +111,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
                 "finalURL": None,
                 "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
                 "totalTime": None,
-                "error": "Failed to fetch URL"
+                "error": f"Failed to fetch: {str(e)}"
             }
         finally:
             if browser:
@@ -127,21 +120,19 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
         await websocket.send_text(json.dumps(result))
 
 async def validate_url(url: str) -> str:
+    """Ensure URL is valid and formatted correctly."""
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     if not validators.url(url):
-        raise ValueError("Invalid URL format")
+        raise ValueError(f"Invalid URL: {url}")
     return url
 
 @app.websocket("/analyze")
-@limiter.limit("15/minute")  # 15 requests per minute per IP
 async def analyze_urls_websocket(websocket: WebSocket):
-    logger.info("WebSocket connection attempt")
+    """WebSocket endpoint to analyze URLs in real-time."""
     await websocket.accept()
-    logger.info("WebSocket connection accepted")
     try:
         data = await websocket.receive_json()
-        logger.info(f"Received data: {data}")
         urls = list(set(filter(None, data.get("urls", []))))
         if not urls:
             await websocket.send_text(json.dumps({"error": "No valid URLs provided"}))
@@ -152,18 +143,15 @@ async def analyze_urls_websocket(websocket: WebSocket):
             await fetch_url_with_playwright(url, websocket)
 
         await websocket.send_text(json.dumps({"done": True}))
-    except ValueError as ve:
-        logger.error(f"Validation error: {ve}")
-        await websocket.send_text(json.dumps({"error": "Invalid input"}))
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        await websocket.send_text(json.dumps({"error": "Internal server error"}))
+        await websocket.send_text(json.dumps({"error": f"Server error: {str(e)}"}))
     finally:
         await websocket.close()
-        logger.info("WebSocket connection closed")
 
 @app.get("/test")
 async def test():
+    """Health check endpoint."""
     return {"status": "OK", "message": "Service operational"}
 
 if __name__ == "__main__":
