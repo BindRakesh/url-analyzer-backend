@@ -35,7 +35,6 @@ def get_server_name(headers: dict, url: str) -> str:
     return "Unknown"
 
 async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
-    """Fetch URL using Playwright and send results via WebSocket. Returns False if client disconnects."""
     async with async_playwright() as playwright:
         browser = None
         try:
@@ -155,7 +154,7 @@ async def analyze_urls_websocket(websocket: WebSocket):
         for url in validated_urls:
             # Check if client is still connected
             try:
-                await websocket.send_text(json.dumps({"processing": url}))
+                await websocket.send_text(json.dumps({"status": "processing", "url": url}))
             except WebSocketDisconnect:
                 logger.info("Client disconnected before processing started")
                 return
@@ -167,7 +166,7 @@ async def analyze_urls_websocket(websocket: WebSocket):
                 return
 
             # Add a small delay to allow memory cleanup
-            await asyncio.sleep(1)  # 1-second delay between URLs
+            await asyncio.sleep(1)
 
         await websocket.send_text(json.dumps({"done": True}))
     except WebSocketDisconnect:
