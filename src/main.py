@@ -1,6 +1,10 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, HTTPException, Request, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright, Playwright
+from fastapi.security import APIKeyQuery
+from playwright.async_api import async_playwright
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import asyncio
 import logging
 import validators
@@ -11,9 +15,24 @@ import os
 
 app = FastAPI()
 
+# Rate limiting setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# API key setup (using query param for WebSocket compatibility)
+API_KEY = "secret-api-key-mai-nahi-bataunga"  # Replace with a secure key
+api_key_query = APIKeyQuery(name="api_key")
+
+async def verify_api_key(api_key: str = Depends(api_key_query)):
+    if api_key != API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
+
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Replace with your Netlify URL later
+    allow_origins=["https://your-netlify-app.netlify.app"],  # Replace with your Netlify URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -67,7 +86,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
             page.on("response", handle_response)
 
             try:
-                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")  # Increase to 30s
+                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
             except Exception as nav_error:
                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
                 final_url = page.url if page.url else url
@@ -110,7 +129,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
                 "finalURL": None,
                 "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
                 "totalTime": None,
-                "error": f"Failed to fetch: {str(e)}"
+                "error": "Failed to fetch URL"
             }
         finally:
             if browser:
@@ -123,11 +142,12 @@ async def validate_url(url: str) -> str:
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     if not validators.url(url):
-        raise ValueError(f"Invalid URL: {url}")
+        raise ValueError("Invalid URL format")
     return url
 
 @app.websocket("/analyze")
-async def analyze_urls_websocket(websocket: WebSocket):
+@limiter.limit("15/minute")  # 15 requests per minute per IP
+async def analyze_urls_websocket(websocket: WebSocket, api_key: str = Depends(verify_api_key)):
     """WebSocket endpoint to analyze URLs in real-time."""
     await websocket.accept()
     try:
@@ -142,9 +162,12 @@ async def analyze_urls_websocket(websocket: WebSocket):
             await fetch_url_with_playwright(url, websocket)
 
         await websocket.send_text(json.dumps({"done": True}))
+    except ValueError as ve:
+        logger.error(f"Validation error: {ve}")
+        await websocket.send_text(json.dumps({"error": "Invalid input"}))
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        await websocket.send_text(json.dumps({"error": f"Server error: {str(e)}"}))
+        await websocket.send_text(json.dumps({"error": "Internal server error"}))
     finally:
         await websocket.close()
 
