@@ -1,7 +1,9 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket, Depends
+from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import APIKeyQuery
 from playwright.async_api import async_playwright
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 import asyncio
 import logging
 import validators
@@ -12,24 +14,15 @@ import os
 
 app = FastAPI()
 
-# API key setup
-API_KEY = "secret-api-key-mai-nahi-bataunga"  # Match your key
-api_key_query = APIKeyQuery(name="api_key", auto_error=False)
+# Rate limiting setup
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-async def verify_api_key(api_key: str = Depends(api_key_query)):
-    if not api_key:
-        logger.error("No API key provided")
-        raise HTTPException(status_code=403, detail="API Key required")
-    if api_key != API_KEY:
-        logger.error(f"Invalid API key provided: {api_key}")
-        raise HTTPException(status_code=403, detail="Invalid API Key")
-    logger.info("API key verified successfully")
-    return api_key
-
-# CORS setup (allow wscat for testing)
+# CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://your-netlify-app.netlify.app", "*"],  # Replace with your Netlify URL, keep "*" for wscat
+    allow_origins=["https://urljourney.netlify.app/"],  # FE Netlify URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -55,7 +48,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
         browser = None
         try:
             logger.info(f"Launching browser for {url}")
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context()
             page = await context.new_page()
 
@@ -141,10 +134,14 @@ async def validate_url(url: str) -> str:
     return url
 
 @app.websocket("/analyze")
-async def analyze_urls_websocket(websocket: WebSocket, api_key: str = Depends(verify_api_key)):
+@limiter.limit("15/minute")  # 15 requests per minute per IP
+async def analyze_urls_websocket(websocket: WebSocket):
+    logger.info("WebSocket connection attempt")
     await websocket.accept()
+    logger.info("WebSocket connection accepted")
     try:
         data = await websocket.receive_json()
+        logger.info(f"Received data: {data}")
         urls = list(set(filter(None, data.get("urls", []))))
         if not urls:
             await websocket.send_text(json.dumps({"error": "No valid URLs provided"}))
@@ -163,6 +160,7 @@ async def analyze_urls_websocket(websocket: WebSocket, api_key: str = Depends(ve
         await websocket.send_text(json.dumps({"error": "Internal server error"}))
     finally:
         await websocket.close()
+        logger.info("WebSocket connection closed")
 
 @app.get("/test")
 async def test():
