@@ -32,7 +32,7 @@ async def verify_api_key(api_key: str = Depends(api_key_query)):
 # CORS setup
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://your-netlify-app.netlify.app"],  # Replace with your Netlify URL
+    allow_origins=["https://urljourney.netlify.app/"],  # Replace with your Netlify URL
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
