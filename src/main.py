@@ -1,6 +1,6 @@
-from fastapi import FastAPI, HTTPException, Request, WebSocket
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from playwright.async_api import async_playwright, Playwright
+from playwright.async_api import async_playwright
 import asyncio
 import logging
 import validators
@@ -34,13 +34,13 @@ def get_server_name(headers: dict, url: str) -> str:
         return "Akamai"
     return "Unknown"
 
-async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
-    """Fetch URL using Playwright and send results via WebSocket with full redirect chain."""
+async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
+    """Fetch URL using Playwright and send results via WebSocket. Returns False if client disconnects."""
     async with async_playwright() as playwright:
         browser = None
         try:
             logger.info(f"Launching browser for {url}")
-            browser = await playwright.chromium.launch(headless=True)
+            browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
             context = await browser.new_context()
             page = await context.new_page()
 
@@ -67,7 +67,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
             page.on("response", handle_response)
 
             try:
-                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")  # Increase to 30s
+                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
             except Exception as nav_error:
                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
                 final_url = page.url if page.url else url
@@ -79,7 +79,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
                     "warning": "Navigation timed out after 30s"
                 }
                 await websocket.send_text(json.dumps(result))
-                return
+                return True
 
             final_url = page.url
 
@@ -103,6 +103,11 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
                 "redirectChain": redirect_chain,
                 "totalTime": time.time() - start_time
             }
+            await websocket.send_text(json.dumps(result))
+            return True
+        except WebSocketDisconnect:
+            logger.info(f"Client disconnected while processing {url}")
+            return False
         except Exception as e:
             logger.error(f"Error fetching {url}: {e}")
             result = {
@@ -110,16 +115,23 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
                 "finalURL": None,
                 "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
                 "totalTime": None,
-                "error": f"Failed to fetch: {str(e)}"
+                "error": "Failed to fetch URL"
             }
+            try:
+                await websocket.send_text(json.dumps(result))
+                return True
+            except WebSocketDisconnect:
+                logger.info(f"Client disconnected while sending error for {url}")
+                return False
         finally:
             if browser:
-                await browser.close()
-
-        await websocket.send_text(json.dumps(result))
+                try:
+                    await browser.close()
+                    logger.info(f"Browser closed for {url}")
+                except Exception as e:
+                    logger.error(f"Error closing browser for {url}: {e}")
 
 async def validate_url(url: str) -> str:
-    """Ensure URL is valid and formatted correctly."""
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     if not validators.url(url):
@@ -128,10 +140,12 @@ async def validate_url(url: str) -> str:
 
 @app.websocket("/analyze")
 async def analyze_urls_websocket(websocket: WebSocket):
-    """WebSocket endpoint to analyze URLs in real-time."""
+    logger.info("WebSocket connection attempt")
     await websocket.accept()
+    logger.info("WebSocket connection accepted")
     try:
         data = await websocket.receive_json()
+        logger.info(f"Received data: {data}")
         urls = list(set(filter(None, data.get("urls", []))))
         if not urls:
             await websocket.send_text(json.dumps({"error": "No valid URLs provided"}))
@@ -139,18 +153,46 @@ async def analyze_urls_websocket(websocket: WebSocket):
 
         validated_urls = [await validate_url(url) for url in urls]
         for url in validated_urls:
-            await fetch_url_with_playwright(url, websocket)
+            # Check if client is still connected
+            try:
+                await websocket.send_text(json.dumps({"processing": url}))
+            except WebSocketDisconnect:
+                logger.info("Client disconnected before processing started")
+                return
+
+            # Process URL and stop if client disconnects
+            continue_processing = await fetch_url_with_playwright(url, websocket)
+            if not continue_processing:
+                logger.info("Stopping URL processing due to client disconnection")
+                return
+
+            # Add a small delay to allow memory cleanup
+            await asyncio.sleep(1)  # 1-second delay between URLs
 
         await websocket.send_text(json.dumps({"done": True}))
+    except WebSocketDisconnect:
+        logger.info("Client disconnected during WebSocket operation")
+    except ValueError as ve:
+        logger.error(f"Validation error: {ve}")
+        try:
+            await websocket.send_text(json.dumps({"error": "Invalid input"}))
+        except WebSocketDisconnect:
+            logger.info("Client disconnected while sending validation error")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
-        await websocket.send_text(json.dumps({"error": f"Server error: {str(e)}"}))
+        try:
+            await websocket.send_text(json.dumps({"error": "Internal server error"}))
+        except WebSocketDisconnect:
+            logger.info("Client disconnected while sending error")
     finally:
-        await websocket.close()
+        try:
+            await websocket.close()
+            logger.info("WebSocket connection closed")
+        except Exception as e:
+            logger.error(f"Error closing WebSocket: {e}")
 
 @app.get("/test")
 async def test():
-    """Health check endpoint."""
     return {"status": "OK", "message": "Service operational"}
 
 if __name__ == "__main__":
