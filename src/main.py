@@ -1,4 +1,3 @@
-for now my code is 
 from fastapi import FastAPI, HTTPException, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from playwright.async_api import async_playwright, Playwright
