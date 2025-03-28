@@ -3,4 +3,3 @@ uvicorn==0.21.1
 websockets==10.4  # Explicit WebSocket lib
 playwright==1.40.0
 validators==0.22.0
-slowapi==0.1.8
