@@ -2,9 +2,6 @@ from fastapi import FastAPI, HTTPException, Request, WebSocket, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import APIKeyQuery
 from playwright.async_api import async_playwright
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 import asyncio
 import logging
 import validators
@@ -15,24 +12,24 @@ import os
 
 app = FastAPI()
 
-# Rate limiting setup
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
-
-# API key setup (using query param for WebSocket compatibility)
-API_KEY = "secret-api-key-mai-nahi-bataunga"  # Replace with a secure key
-api_key_query = APIKeyQuery(name="api_key")
+# API key setup
+API_KEY = "secret-api-key-mai-nahi-bataunga"  # Match your key
+api_key_query = APIKeyQuery(name="api_key", auto_error=False)
 
 async def verify_api_key(api_key: str = Depends(api_key_query)):
+    if not api_key:
+        logger.error("No API key provided")
+        raise HTTPException(status_code=403, detail="API Key required")
     if api_key != API_KEY:
+        logger.error(f"Invalid API key provided: {api_key}")
         raise HTTPException(status_code=403, detail="Invalid API Key")
+    logger.info("API key verified successfully")
     return api_key
 
-# CORS setup
+# CORS setup (allow wscat for testing)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://urljourney.netlify.app/"],  # Replace with your Netlify URL
+    allow_origins=["https://your-netlify-app.netlify.app", "*"],  # Replace with your Netlify URL, keep "*" for wscat
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -54,7 +51,6 @@ def get_server_name(headers: dict, url: str) -> str:
     return "Unknown"
 
 async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
-    """Fetch URL using Playwright and send results via WebSocket with full redirect chain."""
     async with async_playwright() as playwright:
         browser = None
         try:
@@ -138,7 +134,6 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> None:
         await websocket.send_text(json.dumps(result))
 
 async def validate_url(url: str) -> str:
-    """Ensure URL is valid and formatted correctly."""
     if not url.startswith(("http://", "https://")):
         url = f"https://{url}"
     if not validators.url(url):
@@ -146,9 +141,7 @@ async def validate_url(url: str) -> str:
     return url
 
 @app.websocket("/analyze")
-@limiter.limit("15/minute")  # 15 requests per minute per IP
 async def analyze_urls_websocket(websocket: WebSocket, api_key: str = Depends(verify_api_key)):
-    """WebSocket endpoint to analyze URLs in real-time."""
     await websocket.accept()
     try:
         data = await websocket.receive_json()
@@ -173,7 +166,6 @@ async def analyze_urls_websocket(websocket: WebSocket, api_key: str = Depends(ve
 
 @app.get("/test")
 async def test():
-    """Health check endpoint."""
     return {"status": "OK", "message": "Service operational"}
 
 if __name__ == "__main__":
