@@ -34,6 +34,102 @@ def get_server_name(headers: dict, url: str) -> str:
         return "Akamai"
     return "Unknown"
 
+# async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
+#     async with async_playwright() as playwright:
+#         browser = None
+#         try:
+#             logger.info(f"Launching browser for {url}")
+#             browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
+#             context = await browser.new_context()
+#             page = await context.new_page()
+
+#             redirect_chain = []
+#             start_time = time.time()
+
+#             async def handle_request(request):
+#                 if request.is_navigation_request():
+#                     logger.debug(f"Navigation request: {request.url}")
+
+#             async def handle_response(response):
+#                 if response.request.is_navigation_request():
+#                     hop = {
+#                         "url": response.url,
+#                         "status": response.status,
+#                         "server": get_server_name(response.headers, response.url),
+#                         "timestamp": time.time() - start_time
+#                     }
+#                     if not redirect_chain or redirect_chain[-1]["url"] != hop["url"]:
+#                         redirect_chain.append(hop)
+#                         logger.debug(f"Added hop: {hop}")
+
+#             page.on("request", handle_request)
+#             page.on("response", handle_response)
+
+#             try:
+#                 response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+#             except Exception as nav_error:
+#                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
+#                 final_url = page.url if page.url else url
+#                 result = {
+#                     "originalURL": url,
+#                     "finalURL": final_url,
+#                     "redirectChain": redirect_chain,
+#                     "totalTime": time.time() - start_time,
+#                     "warning": "Navigation timed out after 30s"
+#                 }
+#                 await websocket.send_text(json.dumps(result))
+#                 return True
+
+#             final_url = page.url
+
+#             if not redirect_chain or redirect_chain[-1]["url"] != final_url:
+#                 hop = {
+#                     "url": final_url,
+#                     "status": response.status if response else 200,
+#                     "server": get_server_name(response.headers, final_url) if response else "Unknown",
+#                     "timestamp": time.time() - start_time
+#                 }
+#                 redirect_chain.append(hop)
+#                 logger.debug(f"Added final hop: {hop}")
+
+#             if len(redirect_chain) > 10:
+#                 logger.warning(f"Possible redirect loop detected for {url}")
+#                 redirect_chain.append({"error": "Excessive redirects (limit: 10)"})
+
+#             result = {
+#                 "originalURL": url,
+#                 "finalURL": final_url,
+#                 "redirectChain": redirect_chain,
+#                 "totalTime": time.time() - start_time
+#             }
+#             await websocket.send_text(json.dumps(result))
+#             return True
+#         except WebSocketDisconnect:
+#             logger.info(f"Client disconnected while processing {url}")
+#             return False
+#         except Exception as e:
+#             logger.error(f"Error fetching {url}: {e}")
+#             result = {
+#                 "originalURL": url,
+#                 "finalURL": None,
+#                 "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
+#                 "totalTime": None,
+#                 "error": "Failed to fetch URL"
+#             }
+#             try:
+#                 await websocket.send_text(json.dumps(result))
+#                 return True
+#             except WebSocketDisconnect:
+#                 logger.info(f"Client disconnected while sending error for {url}")
+#                 return False
+#         finally:
+#             if browser:
+#                 try:
+#                     await browser.close()
+#                     logger.info(f"Browser closed for {url}")
+#                 except Exception as e:
+#                     logger.error(f"Error closing browser for {url}: {e}")
+
 async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
     async with async_playwright() as playwright:
         browser = None
@@ -66,7 +162,11 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
             page.on("response", handle_response)
 
             try:
-                response = await page.goto(url, timeout=30000, wait_until="domcontentloaded")
+                # Start waiting for navigation before going to the URL
+                navigation_promise = page.wait_for_navigation(timeout=30000)
+                response = await page.goto(url, timeout=30000, wait_until="networkidle")
+                # Wait for any additional navigation (e.g., client-side redirects)
+                await navigation_promise
             except Exception as nav_error:
                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
                 final_url = page.url if page.url else url
@@ -102,6 +202,7 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
                 "redirectChain": redirect_chain,
                 "totalTime": time.time() - start_time
             }
+            logger.info(f"Result for {url}: {result}")
             await websocket.send_text(json.dumps(result))
             return True
         except WebSocketDisconnect:
