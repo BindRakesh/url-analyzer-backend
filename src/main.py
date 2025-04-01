@@ -136,11 +136,16 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
         try:
             logger.info(f"Launching browser for {url}")
             browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox", "--disable-gpu"])
-            context = await browser.new_context()
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
             page = await context.new_page()
 
             redirect_chain = []
             start_time = time.time()
+
+            # Capture console logs from the page
+            page.on("console", lambda msg: logger.debug(f"Browser console: {msg.text}"))
 
             async def handle_request(request):
                 if request.is_navigation_request():
@@ -162,14 +167,22 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
             page.on("response", handle_response)
 
             try:
-                # Start waiting for navigation before going to the URL
-                navigation_promise = page.wait_for_navigation(timeout=30000)
+                # Navigate to the URL and wait for initial load
                 response = await page.goto(url, timeout=30000, wait_until="networkidle")
-                # Wait for any additional navigation (e.g., client-side redirects)
-                await navigation_promise
+                logger.debug(f"Initial page.url after goto: {page.url}")
+
+                # Wait for additional navigations (e.g., JavaScript redirects)
+                for _ in range(5):  # Allow up to 5 navigation events
+                    try:
+                        navigation_promise = page.wait_for_navigation(timeout=10000)
+                        await navigation_promise
+                        logger.debug(f"Page.url after navigation: {page.url}")
+                    except Exception as nav_error:
+                        logger.debug(f"No further navigation detected: {nav_error}")
+                        break
             except Exception as nav_error:
                 logger.warning(f"Navigation timeout for {url}: {nav_error}")
-                final_url = page.url if page.url else url
+                final_url = page.url if page.url and page.url != "about:blank" else url
                 result = {
                     "originalURL": url,
                     "finalURL": final_url,
@@ -181,6 +194,12 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
                 return True
 
             final_url = page.url
+            logger.debug(f"Final page.url: {final_url}")
+
+            # Fallback if final_url is about:blank
+            if final_url == "about:blank" and redirect_chain:
+                final_url = redirect_chain[-1]["url"]
+                logger.debug(f"Fallback: Using last redirect_chain URL as final_url: {final_url}")
 
             if not redirect_chain or redirect_chain[-1]["url"] != final_url:
                 hop = {
