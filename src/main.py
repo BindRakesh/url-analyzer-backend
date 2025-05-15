@@ -74,7 +74,6 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
                     "originalURL": url,
                     "finalURL": final_url,
                     "redirectChain": redirect_chain,
-                    "totalTime": time.time() - start_time,
                     "warning": "Navigation timed out after 30s"
                 }
                 await websocket.send_text(json.dumps(result))
@@ -100,7 +99,6 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
                 "originalURL": url,
                 "finalURL": final_url,
                 "redirectChain": redirect_chain,
-                "totalTime": time.time() - start_time
             }
             await websocket.send_text(json.dumps(result))
             return True
@@ -113,7 +111,6 @@ async def fetch_url_with_playwright(url: str, websocket: WebSocket) -> bool:
                 "originalURL": url,
                 "finalURL": None,
                 "redirectChain": redirect_chain if 'redirect_chain' in locals() else [],
-                "totalTime": None,
                 "error": "Failed to fetch URL"
             }
             try:
@@ -142,12 +139,13 @@ async def analyze_urls_websocket(websocket: WebSocket):
     logger.info("WebSocket connection attempt")
     await websocket.accept()
     logger.info("WebSocket connection accepted")
+    analysis_start_time = time.time()  # Start the timer for the entire analysis
     try:
         data = await websocket.receive_json()
         logger.info(f"Received data: {data}")
         urls = list(set(filter(None, data.get("urls", []))))
         if not urls:
-            await websocket.send_text(json.dumps({"error": "No valid URLs provided"}))
+            await websocket.send_text(json.dumps({"error": "No valid URLs provided", "totalTime": time.time() - analysis_start_time}))
             return
 
         validated_urls = [await validate_url(url) for url in urls]
@@ -168,19 +166,19 @@ async def analyze_urls_websocket(websocket: WebSocket):
             # Add a small delay to allow memory cleanup
             await asyncio.sleep(1)
 
-        await websocket.send_text(json.dumps({"done": True}))
+        await websocket.send_text(json.dumps({"done": True, "totalTime": time.time() - analysis_start_time}))
     except WebSocketDisconnect:
         logger.info("Client disconnected during WebSocket operation")
     except ValueError as ve:
         logger.error(f"Validation error: {ve}")
         try:
-            await websocket.send_text(json.dumps({"error": "Invalid input"}))
+            await websocket.send_text(json.dumps({"error": "Invalid input", "totalTime": time.time() - analysis_start_time}))
         except WebSocketDisconnect:
             logger.info("Client disconnected while sending validation error")
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
         try:
-            await websocket.send_text(json.dumps({"error": "Internal server error"}))
+            await websocket.send_text(json.dumps({"error": "Internal server error", "totalTime": time.time() - analysis_start_time}))
         except WebSocketDisconnect:
             logger.info("Client disconnected while sending error")
     finally:
