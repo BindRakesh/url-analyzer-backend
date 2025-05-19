@@ -16,6 +16,7 @@ RUN apt-get update && apt-get install -y \
 ENV PLAYWRIGHT_BROWSERS_PATH=/app/.playwright
 RUN playwright install chromium
 RUN playwright install-deps  # Installs all missing browser deps
+RUN python -m playwright install --with-deps
 
 COPY src/ ./src/
 
